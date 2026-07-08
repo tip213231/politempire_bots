@@ -524,6 +524,42 @@ async def cb_a_players(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
 
 
+_PLAYERS_PER_PAGE = 10
+
+
+async def _players_page_kb(action: str, page: int) -> tuple[InlineKeyboardMarkup, int]:
+    """Клавиатура со списком игроков для выбора + пагинация."""
+    total = await users.count_players()
+    max_page = max(0, (total - 1) // _PLAYERS_PER_PAGE)
+    page = max(0, min(page, max_page))
+    players = await users.list_players(page * _PLAYERS_PER_PAGE, _PLAYERS_PER_PAGE)
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for p in players:
+        mark = "⛔ " if p.get("is_banned") else ""
+        rows.append([InlineKeyboardButton(
+            text=f"{mark}{p['username']}",
+            callback_data=f"pu:{action}:{p['id']}",
+        )])
+
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"pl:{action}:{page - 1}"))
+    nav.append(InlineKeyboardButton(
+        text=f"{page + 1}/{max_page + 1}", callback_data="noop"
+    ))
+    if page < max_page:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"pl:{action}:{page + 1}"))
+    rows.append(nav)
+    rows.append([InlineKeyboardButton(text="✖️ Отмена", callback_data="a_players")])
+    return InlineKeyboardMarkup(inline_keyboard=rows), total
+
+
+@router.callback_query(F.data == "noop")
+async def cb_noop(cb: CallbackQuery) -> None:
+    await cb.answer()
+
+
 @router.callback_query(F.data.startswith("pa_"))
 async def cb_player_action(cb: CallbackQuery, state: FSMContext) -> None:
     if not await _require_admin_cb(cb):
@@ -534,20 +570,93 @@ async def cb_player_action(cb: CallbackQuery, state: FSMContext) -> None:
         await cb.answer("Неизвестное действие", show_alert=True)
         return
     await state.clear()
-    await state.set_state(AdminAction.waiting_nick)
-    await state.update_data(action=action)
-    prompt = (
-        f"{meta['title']}\n\n"
-        f"Введи <b>ник игрока</b> в Minecraft:"
-        if action != "reset_ref"
-        else f"{meta['title']}\n\nВведи <b>Discord ID</b> пригласившего:"
-    )
-    await cb.message.answer(prompt, reply_markup=_cancel_kb())
+
+    # Сброс рефералов работает по Discord ID — оставляем ручной ввод.
+    if action == "reset_ref":
+        await state.set_state(AdminAction.waiting_nick)
+        await state.update_data(action=action)
+        await cb.message.answer(
+            f"{meta['title']}\n\nВведи <b>Discord ID</b> пригласившего:",
+            reply_markup=_cancel_kb(),
+        )
+        await cb.answer()
+        return
+
+    kb, total = await _players_page_kb(action, 0)
+    if total == 0:
+        await cb.answer("Игроков пока нет", show_alert=True)
+        return
+    text = f"{meta['title']}\n\nВыбери игрока из списка (всего: {total}) 👇"
+    try:
+        await cb.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        await cb.message.answer(text, reply_markup=kb)
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("pl:"))
+async def cb_players_page(cb: CallbackQuery) -> None:
+    """Пагинация списка игроков."""
+    if not await _require_admin_cb(cb):
+        return
+    _, action, page_s = cb.data.split(":", 2)
+    meta = _PLAYER_ACTIONS.get(action)
+    if not meta:
+        await cb.answer("Неизвестное действие", show_alert=True)
+        return
+    kb, total = await _players_page_kb(action, int(page_s))
+    text = f"{meta['title']}\n\nВыбери игрока из списка (всего: {total}) 👇"
+    try:
+        await cb.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        pass
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("pu:"))
+async def cb_player_pick(cb: CallbackQuery, state: FSMContext) -> None:
+    """Игрок выбран из списка."""
+    if not await _require_admin_cb(cb):
+        return
+    _, action, uid_s = cb.data.split(":", 2)
+    meta = _PLAYER_ACTIONS.get(action)
+    user = await users.get_by_id(int(uid_s))
+    if not meta or not user:
+        await cb.answer("Игрок не найден", show_alert=True)
+        return
+    username = user["username"]
+
+    if "amount" in meta["needs"]:
+        await state.clear()
+        await state.set_state(AdminAction.waiting_amount)
+        await state.update_data(action=action, nick=username)
+        await cb.message.answer(
+            f"{meta['title']} — <code>{_esc(username)}</code>\n"
+            f"Введи <b>сумму</b> DC Coin (целое число больше 0):",
+            reply_markup=_cancel_kb(),
+        )
+        await cb.answer()
+        return
+    if "reason" in meta["needs"]:
+        await state.clear()
+        await state.set_state(AdminAction.waiting_reason)
+        await state.update_data(action=action, nick=username)
+        await cb.message.answer(
+            f"{meta['title']} — <code>{_esc(username)}</code>\n"
+            f"Введи <b>причину</b> бана (или «-» чтобы не указывать):",
+            reply_markup=_cancel_kb(),
+        )
+        await cb.answer()
+        return
+
+    await _finish_player_action(cb.message, state, action, username,
+                                admin_id=cb.from_user.id)
     await cb.answer()
 
 
 @router.message(AdminAction.waiting_nick)
 async def admin_action_nick(message: Message, state: FSMContext) -> None:
+    """Сейчас используется только для сброса рефералов (ввод Discord ID)."""
     if not await users.is_bot_admin(message.from_user.id):
         await state.clear()
         return
@@ -555,7 +664,6 @@ async def admin_action_nick(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     action = data.get("action")
 
-    # Сброс рефералов работает по Discord ID, а не по нику.
     if action == "reset_ref":
         if not value.isdigit():
             await message.answer("⚠️ Discord ID должен быть числом. Введи ещё раз или нажми «Отмена»:")
@@ -568,31 +676,7 @@ async def admin_action_nick(message: Message, state: FSMContext) -> None:
             reply_markup=_admin_players_kb(),
         )
         return
-
-    user = await users.get_by_username(value)
-    if not user:
-        await message.answer("❌ Игрок не найден. Введи ник ещё раз или нажми «Отмена»:")
-        return
-    await state.update_data(nick=user["username"])
-
-    meta = _PLAYER_ACTIONS[action]
-    if "amount" in meta["needs"]:
-        await state.set_state(AdminAction.waiting_amount)
-        await message.answer(
-            f"Игрок <code>{_esc(user['username'])}</code> найден.\n"
-            f"Введи <b>сумму</b> DC Coin (целое число больше 0):",
-            reply_markup=_cancel_kb(),
-        )
-        return
-    if "reason" in meta["needs"]:
-        await state.set_state(AdminAction.waiting_reason)
-        await message.answer(
-            f"Игрок <code>{_esc(user['username'])}</code> найден.\n"
-            f"Введи <b>прич��ну</b> бана (или «-» чтобы не указывать):",
-            reply_markup=_cancel_kb(),
-        )
-        return
-    await _finish_player_action(message, state, action, user["username"])
+    await state.clear()
 
 
 @router.message(AdminAction.waiting_amount)
@@ -631,10 +715,13 @@ async def _finish_player_action(
     username: str,
     amount: int | None = None,
     reason: str | None = None,
+    admin_id: int | None = None,
 ) -> None:
     """Выполняет выбранное действие и показывает результат с меню управления."""
     await state.clear()
-    admin_id = message.from_user.id
+    # При вызове из callback message.from_user — это бот, поэтому admin_id передаётся явно.
+    if admin_id is None:
+        admin_id = message.from_user.id
     kb = _admin_players_kb()
 
     if action == "balance":
@@ -759,7 +846,7 @@ async def cmd_reset_referrals(message: Message) -> None:
         return
     await db.execute("DELETE FROM bot_referrals WHERE inviter_discord_id=%s", (int(parts[1]),))
     await users.log_admin_action(message.from_user.id, "reset_referrals", parts[1])
-    await message.answer(f"✅ Реферальная статистика для <code>{parts[1]}</code> сброшена.")
+    await message.answer(f"✅ Реферальная статис��ика для <code>{parts[1]}</code> сброшена.")
 
 
 @router.message(Command("force2fa"))

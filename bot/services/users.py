@@ -84,6 +84,24 @@ async def register(telegram_id: int, username: str, password: str) -> tuple[bool
     return True, f"Аккаунт {username} зарегистрирован."
 
 
+async def get_by_id(user_id: int) -> dict | None:
+    return await db.fetchone("SELECT * FROM users WHERE id=%s", (user_id,))
+
+
+async def list_players(offset: int, limit: int) -> list[dict]:
+    """Страница игроков для выбора в админ-панели."""
+    return await db.fetchall(
+        "SELECT id, username, is_banned FROM users "
+        "ORDER BY username ASC LIMIT %s OFFSET %s",
+        (limit, offset),
+    )
+
+
+async def count_players() -> int:
+    row = await db.fetchone("SELECT COUNT(*) AS c FROM users")
+    return int(row["c"]) if row else 0
+
+
 async def set_password(user_id: int, new_password: str) -> None:
     """Обновляет пароль игрока (bcrypt)."""
     await db.execute(
