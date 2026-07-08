@@ -40,6 +40,14 @@ class AdminBroadcast(StatesGroup):
     waiting_content = State()
 
 
+class AdminAction(StatesGroup):
+    """Пошаговый ввод для управления игроком через кнопки.
+    Тип действия хранится в data['action']."""
+    waiting_nick = State()
+    waiting_amount = State()
+    waiting_reason = State()
+
+
 def _esc(text: str) -> str:
     return html.escape(str(text))
 
@@ -80,6 +88,7 @@ def _socials_kb() -> InlineKeyboardMarkup:
 def _admin_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="a_stats")],
+        [InlineKeyboardButton(text="🧑‍💼 Управление игроком", callback_data="a_players")],
         [
             InlineKeyboardButton(text="📨 Приглашения", callback_data="a_log_invites"),
             InlineKeyboardButton(text="💰 Начисления", callback_data="a_log_balance"),
@@ -90,8 +99,32 @@ def _admin_kb() -> InlineKeyboardMarkup:
         ],
         [InlineKeyboardButton(text="🔐 Обязательная 2FA вкл/выкл", callback_data="a_force2fa")],
         [InlineKeyboardButton(text="📣 Рассылка", callback_data="a_broadcast")],
-        [InlineKeyboardButton(text="❓ Команды администратора", callback_data="a_help")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu")],
+    ])
+
+
+def _admin_players_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💰 Баланс игрока", callback_data="pa_balance")],
+        [
+            InlineKeyboardButton(text="➕ Начислить DC Coin", callback_data="pa_give"),
+            InlineKeyboardButton(text="➖ Списать DC Coin", callback_data="pa_take"),
+        ],
+        [
+            InlineKeyboardButton(text="⛔ Забанить", callback_data="pa_ban"),
+            InlineKeyboardButton(text="🟢 Разбанить", callback_data="pa_unban"),
+        ],
+        [
+            InlineKeyboardButton(text="🗑 Удалить аккаунт", callback_data="pa_delete"),
+            InlineKeyboardButton(text="♻️ Сброс рефералов", callback_data="pa_reset_ref"),
+        ],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")],
+    ])
+
+
+def _cancel_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✖️ Отмена", callback_data="a_players")],
     ])
 
 
@@ -356,31 +389,12 @@ async def _require_admin_cb(cb: CallbackQuery) -> bool:
     return True
 
 
-_ADMIN_HELP = (
-    "🛠 <b>Команды администратора</b>\n\n"
-    "/stats — статистика приглашений и регистраций\n"
-    "/balance &lt;ник&gt; — баланс игрока\n"
-    "/give &lt;ник&gt; &lt;сумма&gt; — начислить DC Coin (RCON)\n"
-    "/take &lt;ник&gt; &lt;сумма&gt; — списать DC Coin (RCON)\n"
-    "/reset_referrals &lt;discord_id&gt; — сбросить реф. статистику\n"
-    "/force2fa on|off — обязательная 2FA\n"
-    "/ban &lt;ник&gt; [причина] — забанить\n"
-    "/unban &lt;ник&gt; — разбанить\n"
-    "/delete &lt;ник&gt; — удалить аккаунт\n"
-    "/log_invites — журнал приглашений\n"
-    "/log_balance [ник] — журнал начислений\n"
-    "/log_auth [ник] — журнал авторизаций\n"
-    "/log_admin — журнал действий администрации\n"
-    "/broadcast — рассылка всем игрокам"
-)
-
-
 @router.message(Command("admin"))
 async def cmd_admin(message: Message) -> None:
     if not await _require_admin(message):
         return
     await message.answer(
-        "🛠 <b>Админ-панель PolitEmpire</b>\n\nВыбери действие 👇",
+        "🛠 <b>Админ-п��нель PolitEmpire</b>\n\nВыбери действие 👇",
         reply_markup=_admin_kb(),
     )
 
@@ -399,17 +413,6 @@ async def cb_admin_panel(cb: CallbackQuery) -> None:
             "🛠 <b>Админ-панель PolitEmpire</b>\n\nВыбери действие 👇",
             reply_markup=_admin_kb(),
         )
-    await cb.answer()
-
-
-@router.callback_query(F.data == "a_help")
-async def cb_a_help(cb: CallbackQuery) -> None:
-    if not await _require_admin_cb(cb):
-        return
-    try:
-        await cb.message.edit_text(_ADMIN_HELP, reply_markup=_admin_kb())
-    except Exception:
-        await cb.message.answer(_ADMIN_HELP, reply_markup=_admin_kb())
     await cb.answer()
 
 
@@ -474,6 +477,211 @@ async def cb_a_broadcast(cb: CallbackQuery, state: FSMContext) -> None:
         "Для отмены — /cancel"
     )
     await cb.answer()
+
+
+# ---------- Кнопочное управление игроком ----------
+
+# Что просить у админа для каждого действия и как его подписать.
+_PLAYER_ACTIONS = {
+    "balance": {"title": "💰 Баланс игрока", "needs": ()},
+    "give": {"title": "➕ Начислить DC Coin", "needs": ("amount",)},
+    "take": {"title": "➖ Списать DC Coin", "needs": ("amount",)},
+    "ban": {"title": "⛔ Забанить игрока", "needs": ("reason",)},
+    "unban": {"title": "🟢 Разбанить игрока", "needs": ()},
+    "delete": {"title": "🗑 Удалить аккаунт", "needs": ()},
+    "reset_ref": {"title": "♻️ Сброс рефералов", "needs": ()},
+}
+
+
+@router.callback_query(F.data == "a_players")
+async def cb_a_players(cb: CallbackQuery, state: FSMContext) -> None:
+    if not await _require_admin_cb(cb):
+        return
+    await state.clear()
+    text = (
+        "🧑‍💼 <b>Управление игроком</b>\n\n"
+        "Выбери действие — бот пошагово спросит нужные данные 👇"
+    )
+    try:
+        await cb.message.edit_text(text, reply_markup=_admin_players_kb())
+    except Exception:
+        await cb.message.answer(text, reply_markup=_admin_players_kb())
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("pa_"))
+async def cb_player_action(cb: CallbackQuery, state: FSMContext) -> None:
+    if not await _require_admin_cb(cb):
+        return
+    action = cb.data[len("pa_"):]
+    meta = _PLAYER_ACTIONS.get(action)
+    if not meta:
+        await cb.answer("Неизвестное действие", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(AdminAction.waiting_nick)
+    await state.update_data(action=action)
+    prompt = (
+        f"{meta['title']}\n\n"
+        f"Введи <b>ник игрока</b> в Minecraft:"
+        if action != "reset_ref"
+        else f"{meta['title']}\n\nВведи <b>Discord ID</b> пригласившего:"
+    )
+    await cb.message.answer(prompt, reply_markup=_cancel_kb())
+    await cb.answer()
+
+
+@router.message(AdminAction.waiting_nick)
+async def admin_action_nick(message: Message, state: FSMContext) -> None:
+    if not await users.is_bot_admin(message.from_user.id):
+        await state.clear()
+        return
+    value = (message.text or "").strip()
+    data = await state.get_data()
+    action = data.get("action")
+
+    # Сброс рефералов работает по Discord ID, а не по нику.
+    if action == "reset_ref":
+        if not value.isdigit():
+            await message.answer("⚠️ Discord ID должен быть числом. Введи ещё раз или нажми «Отмена»:")
+            return
+        await db.execute("DELETE FROM bot_referrals WHERE inviter_discord_id=%s", (int(value),))
+        await users.log_admin_action(message.from_user.id, "reset_referrals", value)
+        await state.clear()
+        await message.answer(
+            f"✅ Реферальная статистика для <code>{_esc(value)}</code> сброшена.",
+            reply_markup=_admin_players_kb(),
+        )
+        return
+
+    user = await users.get_by_username(value)
+    if not user:
+        await message.answer("❌ Игрок не найден. Введи ник ещё раз или нажми «Отмена»:")
+        return
+    await state.update_data(nick=user["username"])
+
+    meta = _PLAYER_ACTIONS[action]
+    if "amount" in meta["needs"]:
+        await state.set_state(AdminAction.waiting_amount)
+        await message.answer(
+            f"Игрок <code>{_esc(user['username'])}</code> найден.\n"
+            f"Введи <b>сумму</b> DC Coin (целое число больше 0):",
+            reply_markup=_cancel_kb(),
+        )
+        return
+    if "reason" in meta["needs"]:
+        await state.set_state(AdminAction.waiting_reason)
+        await message.answer(
+            f"Игрок <code>{_esc(user['username'])}</code> найден.\n"
+            f"Введи <b>причину</b> бана (или «-» чтобы не указывать):",
+            reply_markup=_cancel_kb(),
+        )
+        return
+    await _finish_player_action(message, state, action, user["username"])
+
+
+@router.message(AdminAction.waiting_amount)
+async def admin_action_amount(message: Message, state: FSMContext) -> None:
+    if not await users.is_bot_admin(message.from_user.id):
+        await state.clear()
+        return
+    raw = (message.text or "").strip()
+    if not raw.isdigit() or int(raw) <= 0:
+        await message.answer("⚠️ Введи целое число больше 0 или нажми «Отмена»:")
+        return
+    data = await state.get_data()
+    await _finish_player_action(
+        message, state, data["action"], data["nick"], amount=int(raw)
+    )
+
+
+@router.message(AdminAction.waiting_reason)
+async def admin_action_reason(message: Message, state: FSMContext) -> None:
+    if not await users.is_bot_admin(message.from_user.id):
+        await state.clear()
+        return
+    reason = (message.text or "").strip()
+    if reason in ("-", ""):
+        reason = "Не указана"
+    data = await state.get_data()
+    await _finish_player_action(
+        message, state, data["action"], data["nick"], reason=reason
+    )
+
+
+async def _finish_player_action(
+    message: Message,
+    state: FSMContext,
+    action: str,
+    username: str,
+    amount: int | None = None,
+    reason: str | None = None,
+) -> None:
+    """Выполняет выбранное действие и показывает результат с меню управления."""
+    await state.clear()
+    admin_id = message.from_user.id
+    kb = _admin_players_kb()
+
+    if action == "balance":
+        user = await users.get_by_username(username)
+        bal = user["balance"] if user else 0
+        await message.answer(
+            f"💰 Баланс <code>{_esc(username)}</code>: <b>{bal}</b> DC Coin",
+            reply_markup=kb,
+        )
+        return
+
+    if action in ("give", "take"):
+        from bot import rcon
+        give = action == "give"
+        try:
+            fn = rcon.give_coins if give else rcon.take_coins
+            await fn(
+                username, amount,
+                f"Ручное {'начисление' if give else 'списание'} администратором",
+                actor=f"tg:{admin_id}",
+            )
+            await users.log_admin_action(admin_id, f"coins_{action}", username, str(amount))
+            await message.answer(
+                f"✅ {'Начислено' if give else 'Списано'} <b>{amount}</b> DC Coin — "
+                f"<code>{_esc(username)}</code>",
+                reply_markup=kb,
+            )
+        except Exception as e:
+            log.exception("RCON %s failed", action)
+            await message.answer(f"❌ Ошибка RCON: {_esc(e)}", reply_markup=kb)
+        return
+
+    if action == "ban":
+        if await users.ban(username, reason, admin_id):
+            await users.log_admin_action(admin_id, "ban", username, reason)
+            await message.answer(
+                f"⛔ Игрок <code>{_esc(username)}</code> забанен.\nПричина: {_esc(reason)}",
+                reply_markup=kb,
+            )
+        else:
+            await message.answer("❌ Игрок не найден.", reply_markup=kb)
+        return
+
+    if action == "unban":
+        if await users.unban(username):
+            await users.log_admin_action(admin_id, "unban", username)
+            await message.answer(
+                f"🟢 Игрок <code>{_esc(username)}</code> разбанен.", reply_markup=kb
+            )
+        else:
+            await message.answer("❌ Игрок не найден.", reply_markup=kb)
+        return
+
+    if action == "delete":
+        if await users.delete_account(username):
+            await users.log_admin_action(admin_id, "delete_account", username)
+            await message.answer(
+                f"🗑 Аккаунт <code>{_esc(username)}</code> удалён.", reply_markup=kb
+            )
+        else:
+            await message.answer("❌ Игрок не найден.", reply_markup=kb)
+        return
 
 
 # ---------- Админ-команды (текстовые) ----------
