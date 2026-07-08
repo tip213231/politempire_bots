@@ -189,7 +189,42 @@ async def _migrate() -> None:
     async with _pool.acquire() as conn:  # type: ignore[union-attr]
         async with conn.cursor() as cur:
             for sql in _MIGRATIONS:
-                await cur.execute(sql)
+                try:
+                    await cur.execute(sql)
+                except aiomysql.OperationalError as e:
+                    # 1142 = нет права CREATE. Проверяем, что таблица уже есть.
+                    errno = e.args[0] if e.args else None
+                    if errno == 1142:
+                        table = _table_name(sql)
+                        if await _table_exists(conn, table):
+                            # Таблица уже создана вручную (schema.sql) — пропускаем.
+                            continue
+                        raise RuntimeError(
+                            f"У пользователя БД '{config.DB_USER}' нет права CREATE, "
+                            f"а таблица '{table}' не существует. Создайте таблицы бота "
+                            f"один раз вручную, выполнив schema.sql под администратором, "
+                            f"либо выдайте пользователю права CREATE, INDEX, ALTER на базу "
+                            f"'{config.DB_NAME}'. Подробности в README."
+                        ) from e
+                    raise
+
+
+def _table_name(create_sql: str) -> str:
+    """Извлекает имя таблицы из 'CREATE TABLE IF NOT EXISTS <name> ('."""
+    marker = "EXISTS"
+    idx = create_sql.upper().find(marker)
+    rest = create_sql[idx + len(marker):].strip()
+    return rest.split("(")[0].strip().strip("`")
+
+
+async def _table_exists(conn, table: str) -> bool:
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema=%s AND table_name=%s",
+            (config.DB_NAME, table),
+        )
+        return await cur.fetchone() is not None
 
 
 # --- Настройки ---
