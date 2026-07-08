@@ -5,11 +5,15 @@ uuid, is_admin, is_banned, balance, created_at, ban_reason, banned_at,
 banned_by, last_login.
 """
 import hashlib
+import logging
+import secrets
 import uuid as uuid_lib
 
 import bcrypt
 
 from bot import config, db
+
+log = logging.getLogger(__name__)
 
 
 def hash_password(password: str) -> str:
@@ -55,12 +59,28 @@ async def register(telegram_id: int, username: str, password: str) -> tuple[bool
         )
         return True, f"Telegram привязан к существующему аккаунту {username}."
 
-    # Новый аккаунт
-    await db.execute(
-        "INSERT INTO users (telegram_id, username, password, uuid, is_admin, is_banned, balance) "
-        "VALUES (%s, %s, %s, %s, 0, 0, 0)",
-        (telegram_id, username, hash_password(password), str(uuid_lib.uuid4())),
-    )
+    # Новый аккаунт. Заполняем ВСЕ текстовые колонки (email/token могут быть
+    # NOT NULL без DEFAULT в существующей таблице сайта — иначе INSERT падает).
+    try:
+        await db.execute(
+            "INSERT INTO users (telegram_id, username, email, password, token, uuid, "
+            "is_admin, is_banned, balance, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, 0, 0, 0, NOW())",
+            (
+                telegram_id,
+                username,
+                f"{username.lower()}@tg.politempire.org",  # заглушка вместо email
+                hash_password(password),
+                secrets.token_hex(32),
+                str(uuid_lib.uuid4()),
+            ),
+        )
+    except Exception:
+        log.exception("Registration INSERT failed for username=%s tg=%s", username, telegram_id)
+        return False, (
+            "Не удалось создать аккаунт (ошибка базы данных). "
+            "Сообщите администратору."
+        )
     return True, f"Аккаунт {username} зарегистрирован."
 
 

@@ -176,7 +176,22 @@ async def reg_password(message: Message, state: FSMContext) -> None:
         await message.answer("⚠️ Пароль слишком короткий (минимум 6 символов). Введи ещё раз:")
         return
     data = await state.get_data()
-    ok, msg = await users.register(message.from_user.id, data["username"], password)
+    username = data.get("username")
+    if not username:
+        # Состояние потерялось (например, бот перезапускался) — начинаем заново.
+        await state.clear()
+        await message.answer("⚠️ Сессия регистрации истекла. Отправь /start и попробуй снова.")
+        return
+    try:
+        ok, msg = await users.register(message.from_user.id, username, password)
+    except Exception:
+        log.exception("Registration failed for tg=%s username=%s", message.from_user.id, username)
+        await state.clear()
+        await message.answer(
+            "❌ Внутренняя ошибка при регистрации. Попробуй позже или сообщи администратору.\n"
+            "Отправь /start, чтобы попробовать снова."
+        )
+        return
     await state.clear()
     if ok:
         user = await users.get_by_telegram_id(message.from_user.id)
@@ -194,7 +209,7 @@ async def cb_menu(cb: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     user = await users.get_by_telegram_id(cb.from_user.id)
     if not user:
-        await cb.answer("Вы не зарегистрированы. Отправьте /start", show_alert=True)
+        await cb.answer("В�� не зарегистрированы. Отправьте /start", show_alert=True)
         return
     enabled = await twofa.is_enabled_for_user(user["id"])
     is_admin = await users.is_bot_admin(cb.from_user.id)
@@ -573,7 +588,7 @@ async def admin_action_nick(message: Message, state: FSMContext) -> None:
         await state.set_state(AdminAction.waiting_reason)
         await message.answer(
             f"Игрок <code>{_esc(user['username'])}</code> найден.\n"
-            f"Введи <b>причину</b> бана (или «-» чтобы не указывать):",
+            f"Введи <b>прич��ну</b> бана (или «-» чтобы не указывать):",
             reply_markup=_cancel_kb(),
         )
         return
@@ -768,7 +783,7 @@ async def cmd_ban(message: Message) -> None:
     if len(parts) < 2:
         await message.answer("Использование: /ban <ник> [причина]")
         return
-    reason = parts[2] if len(parts) > 2 else "Не указана"
+    reason = parts[2] if len(parts) > 2 else "Не ук��зана"
     if await users.ban(parts[1], reason, message.from_user.id):
         await users.log_admin_action(message.from_user.id, "ban", parts[1], reason)
         await message.answer(f"⛔ Игрок <code>{_esc(parts[1])}</code> забанен.")
