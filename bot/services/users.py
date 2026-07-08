@@ -110,6 +110,17 @@ async def set_password(user_id: int, new_password: str) -> None:
     )
 
 
+async def set_username(user_id: int, new_username: str) -> tuple[bool, str]:
+    """Меняет ник игрока. Возвращает (успех, сообщение)."""
+    existing = await get_by_username(new_username)
+    if existing and existing["id"] != user_id:
+        return False, "Этот ник уже занят другим игроком."
+    await db.execute(
+        "UPDATE users SET username=%s WHERE id=%s", (new_username, user_id)
+    )
+    return True, "Ник изменён."
+
+
 def is_super_admin(telegram_id: int) -> bool:
     return telegram_id in config.SUPER_ADMIN_IDS
 

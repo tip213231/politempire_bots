@@ -46,6 +46,8 @@ class AdminAction(StatesGroup):
     waiting_nick = State()
     waiting_amount = State()
     waiting_reason = State()
+    waiting_newnick = State()
+    waiting_newpass = State()
 
 
 def _esc(text: str) -> str:
@@ -109,6 +111,10 @@ def _admin_players_kb() -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(text="➕ Начислить DC Coin", callback_data="pa_give"),
             InlineKeyboardButton(text="➖ Списать DC Coin", callback_data="pa_take"),
+        ],
+        [
+            InlineKeyboardButton(text="✏️ Сменить ник", callback_data="pa_setnick"),
+            InlineKeyboardButton(text="🔑 Сменить пароль", callback_data="pa_setpass"),
         ],
         [
             InlineKeyboardButton(text="⛔ Забанить", callback_data="pa_ban"),
@@ -505,6 +511,8 @@ _PLAYER_ACTIONS = {
     "unban": {"title": "🟢 Разбанить игрока", "needs": ()},
     "delete": {"title": "🗑 Удалить аккаунт", "needs": ()},
     "reset_ref": {"title": "♻️ Сброс рефералов", "needs": ()},
+    "setnick": {"title": "✏️ Сменить ник", "needs": ("newnick",)},
+    "setpass": {"title": "🔑 Сменить пароль", "needs": ("newpass",)},
 }
 
 
@@ -648,6 +656,28 @@ async def cb_player_pick(cb: CallbackQuery, state: FSMContext) -> None:
         )
         await cb.answer()
         return
+    if "newnick" in meta["needs"]:
+        await state.clear()
+        await state.set_state(AdminAction.waiting_newnick)
+        await state.update_data(action=action, nick=username, uid=user["id"])
+        await cb.message.answer(
+            f"{meta['title']} — текущий ник <code>{_esc(username)}</code>\n"
+            f"Введи <b>новый ник</b> (3–16 символов, буквы/цифры/_):",
+            reply_markup=_cancel_kb(),
+        )
+        await cb.answer()
+        return
+    if "newpass" in meta["needs"]:
+        await state.clear()
+        await state.set_state(AdminAction.waiting_newpass)
+        await state.update_data(action=action, nick=username, uid=user["id"])
+        await cb.message.answer(
+            f"{meta['title']} — <code>{_esc(username)}</code>\n"
+            f"Введи <b>новый пароль</b> (минимум 6 символов):",
+            reply_markup=_cancel_kb(),
+        )
+        await cb.answer()
+        return
 
     await _finish_player_action(cb.message, state, action, username,
                                 admin_id=cb.from_user.id)
@@ -705,6 +735,61 @@ async def admin_action_reason(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     await _finish_player_action(
         message, state, data["action"], data["nick"], reason=reason
+    )
+
+
+@router.message(AdminAction.waiting_newnick)
+async def admin_action_newnick(message: Message, state: FSMContext) -> None:
+    admin_id = message.from_user.id
+    if not await users.is_bot_admin(admin_id):
+        await state.clear()
+        return
+    new_nick = (message.text or "").strip()
+    if not (3 <= len(new_nick) <= 16) or not new_nick.replace("_", "").isalnum():
+        await message.answer(
+            "⚠️ Ник должен быть 3–16 символов: буквы, цифры или _. Введи ещё раз или нажми «Отмена»:"
+        )
+        return
+    data = await state.get_data()
+    old_nick = data["nick"]
+    await state.clear()
+    ok, msg = await users.set_username(data["uid"], new_nick)
+    if ok:
+        await users.log_admin_action(admin_id, "set_username", old_nick, new_nick)
+        await message.answer(
+            f"✅ Ник изменён: <code>{_esc(old_nick)}</code> → <code>{_esc(new_nick)}</code>",
+            reply_markup=_admin_players_kb(),
+        )
+    else:
+        await message.answer(f"❌ {_esc(msg)}", reply_markup=_admin_players_kb())
+
+
+@router.message(AdminAction.waiting_newpass)
+async def admin_action_newpass(message: Message, state: FSMContext) -> None:
+    admin_id = message.from_user.id
+    if not await users.is_bot_admin(admin_id):
+        await state.clear()
+        return
+    new_pass = (message.text or "").strip()
+    # Пароль удаляем из чата для безопасности.
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    if len(new_pass) < 6:
+        await message.answer(
+            "⚠️ Пароль слишком короткий (минимум 6 символов). Введи ещё раз или нажми «Отмена»:",
+            reply_markup=_cancel_kb(),
+        )
+        return
+    data = await state.get_data()
+    username = data["nick"]
+    await state.clear()
+    await users.set_password(data["uid"], new_pass)
+    await users.log_admin_action(admin_id, "set_password", username)
+    await message.answer(
+        f"✅ Пароль игрока <code>{_esc(username)}</code> изменён.",
+        reply_markup=_admin_players_kb(),
     )
 
 
