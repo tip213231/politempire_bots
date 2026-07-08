@@ -1,0 +1,26 @@
+# Адрес HTTP API бота (bot/api/server.py)
+api-url: "http://127.0.0.1:8180"
+# Должен совпадать с API_SECRET в .env бота
+api-secret: "CHANGE_ME"
+
+# Таймаут HTTP-запросов к боту, секунды
+http-timeout-seconds: 5
+
+2fa:
+  # Сколько секунд даётся на ввод кода, после - кик (должно быть >= TWOFA_CODE_TTL бота)
+  timeout-seconds: 300
+  # Сколько неверных попыток до кика
+  max-attempts: 3
+
+messages:
+  prefix: "&8[&6PolitEmpire&8] &r"
+  need-2fa: "&eНа ваш Telegram отправлен код подтверждения. Введите: &6/2fa <код>"
+  2fa-success: "&aВход подтверждён. Приятной игры!"
+  2fa-wrong: "&cНеверный код. Осталось попыток: &e%attempts%"
+  2fa-kick-attempts: "&cПревышено число попыток ввода кода 2FA."
+  2fa-kick-timeout: "&cВремя на подтверждение 2FA истекло."
+  2fa-usage: "&cИспользование: &e/2fa <код>"
+  2fa-not-required: "&7Подтверждение не требуется."
+  banned-kick: "&cВы заблокированы.&r\n&7Причина: &f%reason%"
+  frozen: "&cСначала подтвердите вход: &e/2fa <код>"
+  api-error: "&cОшибка связи с сервером авторизации, попробуйте позже."
