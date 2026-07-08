@@ -1,0 +1,11 @@
+name: PolitEmpireBotLink
+version: '${project.version}'
+main: ru.politempire.botlink.BotLinkPlugin
+api-version: '1.21'
+description: Интеграция с Telegram/Discord ботом - 2FA и учёт игрового времени
+author: PolitEmpire
+
+commands:
+  2fa:
+    description: Подтвердить код двухфакторной аутентификации
+    usage: /2fa <код>
