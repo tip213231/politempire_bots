@@ -1,4 +1,5 @@
-"""Telegram-бот: регистрация, управление 2FA, админ-панель, рассылка."""
+"""Telegram-бот: регистрация, управление 2FA, смена пароля, соцсети,
+инлайн админ-панель и рассылка."""
 import asyncio
 import html
 import logging
@@ -14,7 +15,7 @@ from aiogram.types import (
     CallbackQuery,
 )
 
-from bot import db
+from bot import config, db
 from bot.services import referrals, twofa, users
 
 log = logging.getLogger("tg")
@@ -26,6 +27,15 @@ class Registration(StatesGroup):
     password = State()
 
 
+class ChangePassword(StatesGroup):
+    current = State()
+    new = State()
+
+
+class Disable2FA(StatesGroup):
+    password = State()
+
+
 class AdminBroadcast(StatesGroup):
     waiting_content = State()
 
@@ -34,31 +44,80 @@ def _esc(text: str) -> str:
     return html.escape(str(text))
 
 
-def _main_kb(twofa_on: bool) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Мой профиль", callback_data="profile")],
+# ---------- Клавиатуры ----------
+
+def _main_kb(twofa_on: bool, is_admin: bool = False) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="👤 Мой профиль", callback_data="profile")],
         [InlineKeyboardButton(
-            text=("Выключить 2FA" if twofa_on else "Включить 2FA"),
+            text=("🔓 Выключить 2FA" if twofa_on else "🔐 Включить 2FA"),
             callback_data="toggle_2fa",
         )],
+        [InlineKeyboardButton(text="🔑 Сменить пароль", callback_data="change_pw")],
+        [InlineKeyboardButton(text="🌐 Наши соцсети", callback_data="socials")],
+    ]
+    if is_admin:
+        rows.append([InlineKeyboardButton(text="🛠 Админ-панель", callback_data="admin_panel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _back_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu")],
     ])
+
+
+def _socials_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 Discord", url=config.SOCIAL_DISCORD)],
+        [InlineKeyboardButton(text="📢 Telegram", url=config.SOCIAL_TELEGRAM)],
+        [InlineKeyboardButton(text="🗺 Карта сервера", url=config.SOCIAL_MAP)],
+        [InlineKeyboardButton(text="🌍 Сайт", url=config.SOCIAL_SITE)],
+        [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu")],
+    ])
+
+
+def _admin_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="a_stats")],
+        [
+            InlineKeyboardButton(text="📨 Приглашения", callback_data="a_log_invites"),
+            InlineKeyboardButton(text="💰 Начисления", callback_data="a_log_balance"),
+        ],
+        [
+            InlineKeyboardButton(text="🔑 Авторизации", callback_data="a_log_auth"),
+            InlineKeyboardButton(text="🧾 Действия админов", callback_data="a_log_admin"),
+        ],
+        [InlineKeyboardButton(text="🔐 Обязательная 2FA вкл/выкл", callback_data="a_force2fa")],
+        [InlineKeyboardButton(text="📣 Рассылка", callback_data="a_broadcast")],
+        [InlineKeyboardButton(text="❓ Команды администратора", callback_data="a_help")],
+        [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu")],
+    ])
+
+
+async def _menu_text(user: dict) -> str:
+    return (
+        f"🏰 <b>PolitEmpire</b>\n\n"
+        f"С возвращением, <b>{_esc(user['username'])}</b>! 👋\n"
+        f"Выбери действие в меню ниже 👇"
+    )
 
 
 # ---------- Регистрация ----------
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext) -> None:
+    await state.clear()
     user = await users.get_by_telegram_id(message.from_user.id)
     if user:
         enabled = await twofa.is_enabled_for_user(user["id"])
-        await message.answer(
-            f"С возвращением, <b>{_esc(user['username'])}</b>!",
-            reply_markup=_main_kb(enabled),
-        )
+        is_admin = await users.is_bot_admin(message.from_user.id)
+        await message.answer(await _menu_text(user), reply_markup=_main_kb(enabled, is_admin))
         return
     await state.set_state(Registration.username)
     await message.answer(
-        "Добро пожаловать! Для регистрации введите ваш <b>ник Minecraft</b>:"
+        "🏰 <b>Добро пожаловать в PolitEmpire!</b>\n\n"
+        "Для регистрации введи свой <b>ник Minecraft</b> 🎮:"
     )
 
 
@@ -66,23 +125,22 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
 async def reg_username(message: Message, state: FSMContext) -> None:
     username = (message.text or "").strip()
     if not (3 <= len(username) <= 16) or not username.replace("_", "").isalnum():
-        await message.answer("Некорректный ник. Введите ник Minecraft (3-16 символов, буквы/цифры/_):")
+        await message.answer("⚠️ Некорректный ник. Введи ник Minecraft (3-16 символов, буквы/цифры/_):")
         return
     await state.update_data(username=username)
     await state.set_state(Registration.password)
-    await message.answer("Теперь введите <b>пароль</b> (сообщение будет удалено из чата):")
+    await message.answer("🔒 Теперь введи <b>пароль</b> (сообщение будет удалено из чата):")
 
 
 @router.message(Registration.password)
 async def reg_password(message: Message, state: FSMContext) -> None:
     password = (message.text or "").strip()
-    # Удаляем сообщение с паролем из чата
     try:
         await message.delete()
     except Exception:
         pass
     if len(password) < 6:
-        await message.answer("Пароль слишком короткий (минимум 6 символов). Введите ещё раз:")
+        await message.answer("⚠️ Пароль слишком короткий (минимум 6 символов). Введи ещё раз:")
         return
     data = await state.get_data()
     ok, msg = await users.register(message.from_user.id, data["username"], password)
@@ -90,9 +148,28 @@ async def reg_password(message: Message, state: FSMContext) -> None:
     if ok:
         user = await users.get_by_telegram_id(message.from_user.id)
         enabled = await twofa.is_enabled_for_user(user["id"])
-        await message.answer(f"{_esc(msg)}", reply_markup=_main_kb(enabled))
+        is_admin = await users.is_bot_admin(message.from_user.id)
+        await message.answer(f"✅ {_esc(msg)}", reply_markup=_main_kb(enabled, is_admin))
     else:
-        await message.answer(f"{_esc(msg)}\n\nОтправьте /start, чтобы попробовать снова.")
+        await message.answer(f"❌ {_esc(msg)}\n\nОтправь /start, чтобы попробовать снова.")
+
+
+# ---------- Меню ----------
+
+@router.callback_query(F.data == "menu")
+async def cb_menu(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    user = await users.get_by_telegram_id(cb.from_user.id)
+    if not user:
+        await cb.answer("Вы не зарегистрированы. Отправьте /start", show_alert=True)
+        return
+    enabled = await twofa.is_enabled_for_user(user["id"])
+    is_admin = await users.is_bot_admin(cb.from_user.id)
+    try:
+        await cb.message.edit_text(await _menu_text(user), reply_markup=_main_kb(enabled, is_admin))
+    except Exception:
+        await cb.message.answer(await _menu_text(user), reply_markup=_main_kb(enabled, is_admin))
+    await cb.answer()
 
 
 # ---------- Профиль и 2FA ----------
@@ -104,40 +181,198 @@ async def cb_profile(cb: CallbackQuery) -> None:
         await cb.answer("Вы не зарегистрированы. Отправьте /start", show_alert=True)
         return
     enabled = await twofa.is_enabled_for_user(user["id"])
-    await cb.message.answer(
-        f"<b>Профиль</b>\n"
-        f"Ник: <code>{_esc(user['username'])}</code>\n"
-        f"Баланс: {user['balance']} DC Coin\n"
-        f"2FA: {'включена' if enabled else 'выключена'}\n"
-        f"Статус: {'забанен' if user['is_banned'] else 'активен'}"
+    role = "👑 Администратор" if await users.is_bot_admin(cb.from_user.id) else "🧑 Игрок"
+    text = (
+        f"👤 <b>Профиль</b>\n\n"
+        f"🎮 Ник: <code>{_esc(user['username'])}</code>\n"
+        f"💰 Баланс: <b>{user['balance']}</b> DC Coin\n"
+        f"🔐 2FA: {'✅ включена' if enabled else '❌ выключена'}\n"
+        f"🚦 Статус: {'⛔ забанен' if user['is_banned'] else '🟢 активен'}\n"
+        f"🏅 Роль: {role}"
     )
+    try:
+        await cb.message.edit_text(text, reply_markup=_back_kb())
+    except Exception:
+        await cb.message.answer(text, reply_markup=_back_kb())
     await cb.answer()
 
 
 @router.callback_query(F.data == "toggle_2fa")
-async def cb_toggle_2fa(cb: CallbackQuery) -> None:
+async def cb_toggle_2fa(cb: CallbackQuery, state: FSMContext) -> None:
     user = await users.get_by_telegram_id(cb.from_user.id)
     if not user:
         await cb.answer("Вы не зарегистрированы. Отправьте /start", show_alert=True)
         return
     force = await db.get_setting("force_2fa", "0")
     if force == "1":
-        await cb.answer("2FA обязательна на сервере и не может быть отключена.", show_alert=True)
+        await cb.answer("🔒 2FA обязательна на сервере и не может быть отключена.", show_alert=True)
         return
     row = await db.fetchone("SELECT enabled FROM bot_2fa WHERE user_id=%s", (user["id"],))
-    new_state = not bool(row and row["enabled"])
-    await twofa.set_enabled(user["id"], new_state)
-    await cb.message.edit_reply_markup(reply_markup=_main_kb(new_state))
-    await cb.answer(f"2FA {'включена' if new_state else 'выключена'}")
+    currently_on = bool(row and row["enabled"])
+    if currently_on:
+        # Для отключения 2FA требуем текущий пароль
+        await state.set_state(Disable2FA.password)
+        await cb.message.answer(
+            "🔒 Для отключения 2FA введи свой <b>текущий пароль</b>.\n"
+            "Сообщение будет удалено. Для отмены — /cancel"
+        )
+        await cb.answer()
+        return
+    # Включение — без пароля
+    await twofa.set_enabled(user["id"], True)
+    is_admin = await users.is_bot_admin(cb.from_user.id)
+    try:
+        await cb.message.edit_reply_markup(reply_markup=_main_kb(True, is_admin))
+    except Exception:
+        pass
+    await cb.answer("🔐 2FA включена")
 
 
-# ---------- Админ-панель ----------
+@router.message(Disable2FA.password)
+async def disable_2fa_password(message: Message, state: FSMContext) -> None:
+    password = (message.text or "").strip()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    user = await users.get_by_telegram_id(message.from_user.id)
+    if not user:
+        await state.clear()
+        await message.answer("Вы не зарегистрированы. Отправьте /start")
+        return
+    if not users.check_password(password, user.get("password")):
+        await message.answer("❌ Неверный пароль. Попробуй ещё раз или /cancel:")
+        return
+    await state.clear()
+    await twofa.set_enabled(user["id"], False)
+    is_admin = await users.is_bot_admin(message.from_user.id)
+    await message.answer(
+        "🔓 2FA отключена.",
+        reply_markup=_main_kb(False, is_admin),
+    )
+
+
+# ---------- Смена пароля ----------
+
+@router.callback_query(F.data == "change_pw")
+async def cb_change_pw(cb: CallbackQuery, state: FSMContext) -> None:
+    user = await users.get_by_telegram_id(cb.from_user.id)
+    if not user:
+        await cb.answer("Вы не зарегистрированы. Отправьте /start", show_alert=True)
+        return
+    await state.set_state(ChangePassword.current)
+    await cb.message.answer(
+        "🔑 <b>Смена пароля</b>\n\n"
+        "Введи свой <b>текущий пароль</b> (сообщение будет удалено). Для отмены — /cancel"
+    )
+    await cb.answer()
+
+
+@router.message(ChangePassword.current)
+async def change_pw_current(message: Message, state: FSMContext) -> None:
+    password = (message.text or "").strip()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    user = await users.get_by_telegram_id(message.from_user.id)
+    if not user:
+        await state.clear()
+        await message.answer("Вы не зарегистрированы. Отправьте /start")
+        return
+    if not users.check_password(password, user.get("password")):
+        await message.answer("❌ Неверный текущий пароль. Попробуй ещё раз или /cancel:")
+        return
+    await state.set_state(ChangePassword.new)
+    await message.answer("✅ Верно! Теперь введи <b>новый пароль</b> (минимум 6 символов):")
+
+
+@router.message(ChangePassword.new)
+async def change_pw_new(message: Message, state: FSMContext) -> None:
+    new_password = (message.text or "").strip()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    if len(new_password) < 6:
+        await message.answer("⚠️ Пароль слишком короткий (минимум 6 символов). Введи ещё раз:")
+        return
+    user = await users.get_by_telegram_id(message.from_user.id)
+    if not user:
+        await state.clear()
+        await message.answer("Вы не зарегистрированы. Отправьте /start")
+        return
+    await users.set_password(user["id"], new_password)
+    await state.clear()
+    enabled = await twofa.is_enabled_for_user(user["id"])
+    is_admin = await users.is_bot_admin(message.from_user.id)
+    await message.answer(
+        "✅ Пароль успешно изменён! 🔑",
+        reply_markup=_main_kb(enabled, is_admin),
+    )
+
+
+# ---------- Соцсети ----------
+
+@router.callback_query(F.data == "socials")
+async def cb_socials(cb: CallbackQuery) -> None:
+    text = (
+        "🌐 <b>Наши ресурсы</b>\n\n"
+        f"💬 Discord: {config.SOCIAL_DISCORD}\n"
+        f"📢 Telegram: {config.SOCIAL_TELEGRAM}\n"
+        f"🗺 Карта сервера: {config.SOCIAL_MAP}\n"
+        f"🌍 Сайт: {config.SOCIAL_SITE}\n\n"
+        "Присоединяйся к нашему сообществу! 🎉"
+    )
+    try:
+        await cb.message.edit_text(text, reply_markup=_socials_kb(), disable_web_page_preview=True)
+    except Exception:
+        await cb.message.answer(text, reply_markup=_socials_kb(), disable_web_page_preview=True)
+    await cb.answer()
+
+
+@router.message(Command("socials"))
+async def cmd_socials(message: Message) -> None:
+    await message.answer(
+        "🌐 <b>Наши ресурсы</b>\n\n"
+        "Выбирай куда заглянуть 👇",
+        reply_markup=_socials_kb(),
+    )
+
+
+# ---------- Инлайн админ-панель ----------
 
 async def _require_admin(message: Message) -> bool:
     if not await users.is_bot_admin(message.from_user.id):
-        await message.answer("Недостаточно прав.")
+        await message.answer("🚫 Недостаточно прав.")
         return False
     return True
+
+
+async def _require_admin_cb(cb: CallbackQuery) -> bool:
+    if not await users.is_bot_admin(cb.from_user.id):
+        await cb.answer("🚫 Недостаточно прав.", show_alert=True)
+        return False
+    return True
+
+
+_ADMIN_HELP = (
+    "🛠 <b>Команды администратора</b>\n\n"
+    "/stats — статистика приглашений и регистраций\n"
+    "/balance &lt;ник&gt; — баланс игрока\n"
+    "/give &lt;ник&gt; &lt;сумма&gt; — начислить DC Coin (RCON)\n"
+    "/take &lt;ник&gt; &lt;сумма&gt; — списать DC Coin (RCON)\n"
+    "/reset_referrals &lt;discord_id&gt; — сбросить реф. статистику\n"
+    "/force2fa on|off — обязательная 2FA\n"
+    "/ban &lt;ник&gt; [причина] — забанить\n"
+    "/unban &lt;ник&gt; — разбанить\n"
+    "/delete &lt;ник&gt; — удалить аккаунт\n"
+    "/log_invites — журнал приглашений\n"
+    "/log_balance [ник] — журнал начислений\n"
+    "/log_auth [ник] — журнал авторизаций\n"
+    "/log_admin — журнал действий администрации\n"
+    "/broadcast — рассылка всем игрокам"
+)
 
 
 @router.message(Command("admin"))
@@ -145,28 +380,40 @@ async def cmd_admin(message: Message) -> None:
     if not await _require_admin(message):
         return
     await message.answer(
-        "<b>Админ-команды</b>\n"
-        "/stats — статистика приглашений и регистраций\n"
-        "/balance &lt;ник&gt; — баланс игрока\n"
-        "/give &lt;ник&gt; &lt;сумма&gt; — начислить DC Coin (RCON)\n"
-        "/take &lt;ник&gt; &lt;сумма&gt; — списать DC Coin (RCON)\n"
-        "/reset_referrals &lt;discord_id&gt; — сбросить реф. статистику\n"
-        "/force2fa on|off — обязательная 2FA\n"
-        "/ban &lt;ник&gt; [причина] — забанить\n"
-        "/unban &lt;ник&gt; — разбанить\n"
-        "/delete &lt;ник&gt; — удалить аккаунт\n"
-        "/log_invites — журнал приглашений\n"
-        "/log_balance [ник] — журнал начислений\n"
-        "/log_auth [ник] — журнал авторизаций\n"
-        "/log_admin — журнал действий администрации\n"
-        "/broadcast — рассылка всем игрокам"
+        "🛠 <b>Админ-панель PolitEmpire</b>\n\nВыбери действие 👇",
+        reply_markup=_admin_kb(),
     )
 
 
-@router.message(Command("stats"))
-async def cmd_stats(message: Message) -> None:
-    if not await _require_admin(message):
+@router.callback_query(F.data == "admin_panel")
+async def cb_admin_panel(cb: CallbackQuery) -> None:
+    if not await _require_admin_cb(cb):
         return
+    try:
+        await cb.message.edit_text(
+            "🛠 <b>Админ-панель PolitEmpire</b>\n\nВыбери действие 👇",
+            reply_markup=_admin_kb(),
+        )
+    except Exception:
+        await cb.message.answer(
+            "🛠 <b>Админ-панель PolitEmpire</b>\n\nВыбери действие 👇",
+            reply_markup=_admin_kb(),
+        )
+    await cb.answer()
+
+
+@router.callback_query(F.data == "a_help")
+async def cb_a_help(cb: CallbackQuery) -> None:
+    if not await _require_admin_cb(cb):
+        return
+    try:
+        await cb.message.edit_text(_ADMIN_HELP, reply_markup=_admin_kb())
+    except Exception:
+        await cb.message.answer(_ADMIN_HELP, reply_markup=_admin_kb())
+    await cb.answer()
+
+
+async def _stats_text() -> str:
     regs = await db.fetchone("SELECT COUNT(*) AS c FROM users")
     tg_linked = await db.fetchone("SELECT COUNT(*) AS c FROM users WHERE telegram_id IS NOT NULL")
     refs = await db.fetchone(
@@ -179,14 +426,57 @@ async def cmd_stats(message: Message) -> None:
     top_text = "\n".join(
         f"  {i+1}. <code>{r['inviter_discord_id']}</code> — {r['c']}" for i, r in enumerate(top)
     ) or "  —"
-    await message.answer(
-        f"<b>Статистика</b>\n"
-        f"Регистраций: {regs['c']} (с Telegram: {tg_linked['c']})\n"
-        f"Приглашений: {refs['total'] or 0}, выполнено: {int(refs['completed'] or 0)}, "
-        f"награждено: {int(refs['rewarded'] or 0)}\n"
-        f"Топ пригласивших:\n{top_text}"
+    return (
+        f"📊 <b>Статистика</b>\n\n"
+        f"👥 Регистраций: {regs['c']} (с Telegram: {tg_linked['c']})\n"
+        f"📨 Приглашений: {refs['total'] or 0}, выполнено: {int(refs['completed'] or 0)}, "
+        f"награждено: {int(refs['rewarded'] or 0)}\n\n"
+        f"🏆 Топ пригласивших:\n{top_text}"
     )
 
+
+@router.callback_query(F.data == "a_stats")
+async def cb_a_stats(cb: CallbackQuery) -> None:
+    if not await _require_admin_cb(cb):
+        return
+    try:
+        await cb.message.edit_text(await _stats_text(), reply_markup=_admin_kb())
+    except Exception:
+        await cb.message.answer(await _stats_text(), reply_markup=_admin_kb())
+    await cb.answer()
+
+
+@router.message(Command("stats"))
+async def cmd_stats(message: Message) -> None:
+    if not await _require_admin(message):
+        return
+    await message.answer(await _stats_text())
+
+
+@router.callback_query(F.data == "a_force2fa")
+async def cb_a_force2fa(cb: CallbackQuery) -> None:
+    if not await _require_admin_cb(cb):
+        return
+    current = await db.get_setting("force_2fa", "0")
+    new = "0" if current == "1" else "1"
+    await db.set_setting("force_2fa", new)
+    await users.log_admin_action(cb.from_user.id, "force_2fa", "on" if new == "1" else "off")
+    await cb.answer(f"Обязательная 2FA {'включена 🔐' if new == '1' else 'выключена 🔓'}", show_alert=True)
+
+
+@router.callback_query(F.data == "a_broadcast")
+async def cb_a_broadcast(cb: CallbackQuery, state: FSMContext) -> None:
+    if not await _require_admin_cb(cb):
+        return
+    await state.set_state(AdminBroadcast.waiting_content)
+    await cb.message.answer(
+        "📣 Отправь сообщение для рассылки (текст, фото, гифка, файл или опрос).\n"
+        "Для отмены — /cancel"
+    )
+    await cb.answer()
+
+
+# ---------- Админ-команды (текстовые) ----------
 
 @router.message(Command("balance"))
 async def cmd_balance(message: Message) -> None:
@@ -198,10 +488,10 @@ async def cmd_balance(message: Message) -> None:
         return
     user = await users.get_by_username(parts[1])
     if not user:
-        await message.answer("Игрок не найден.")
+        await message.answer("❌ Игрок не найден.")
         return
     await message.answer(
-        f"Баланс <code>{_esc(user['username'])}</code>: {user['balance']} DC Coin"
+        f"💰 Баланс <code>{_esc(user['username'])}</code>: <b>{user['balance']}</b> DC Coin"
     )
 
 
@@ -218,10 +508,10 @@ async def _give_take(message: Message, give: bool) -> None:
         await fn(username, amount, f"Ручное {'начисление' if give else 'списание'} администратором",
                  actor=f"tg:{message.from_user.id}")
         await users.log_admin_action(message.from_user.id, f"coins_{action}", username, str(amount))
-        await message.answer(f"Готово: {action} {amount} DC Coin — {_esc(username)}")
+        await message.answer(f"✅ Готово: {action} {amount} DC Coin — {_esc(username)}")
     except Exception as e:
         log.exception("RCON %s failed", action)
-        await message.answer(f"Ошибка RCON: {_esc(e)}")
+        await message.answer(f"❌ Ошибка RCON: {_esc(e)}")
 
 
 @router.message(Command("give"))
@@ -246,7 +536,7 @@ async def cmd_reset_referrals(message: Message) -> None:
         return
     await db.execute("DELETE FROM bot_referrals WHERE inviter_discord_id=%s", (int(parts[1]),))
     await users.log_admin_action(message.from_user.id, "reset_referrals", parts[1])
-    await message.answer(f"Реферальная статистика для <code>{parts[1]}</code> сброшена.")
+    await message.answer(f"✅ Реферальная статистика для <code>{parts[1]}</code> сброшена.")
 
 
 @router.message(Command("force2fa"))
@@ -259,7 +549,7 @@ async def cmd_force2fa(message: Message) -> None:
         return
     await db.set_setting("force_2fa", "1" if parts[1] == "on" else "0")
     await users.log_admin_action(message.from_user.id, "force_2fa", parts[1])
-    await message.answer(f"Обязательная 2FA: {'включена' if parts[1] == 'on' else 'выключена'}")
+    await message.answer(f"🔐 Обязательная 2FA: {'включена' if parts[1] == 'on' else 'выключена'}")
 
 
 @router.message(Command("ban"))
@@ -273,9 +563,9 @@ async def cmd_ban(message: Message) -> None:
     reason = parts[2] if len(parts) > 2 else "Не указана"
     if await users.ban(parts[1], reason, message.from_user.id):
         await users.log_admin_action(message.from_user.id, "ban", parts[1], reason)
-        await message.answer(f"Игрок <code>{_esc(parts[1])}</code> забанен.")
+        await message.answer(f"⛔ Игрок <code>{_esc(parts[1])}</code> забанен.")
     else:
-        await message.answer("Игрок не найден.")
+        await message.answer("❌ Игрок не найден.")
 
 
 @router.message(Command("unban"))
@@ -288,9 +578,9 @@ async def cmd_unban(message: Message) -> None:
         return
     if await users.unban(parts[1]):
         await users.log_admin_action(message.from_user.id, "unban", parts[1])
-        await message.answer(f"Игрок <code>{_esc(parts[1])}</code> разбанен.")
+        await message.answer(f"🟢 Игрок <code>{_esc(parts[1])}</code> разбанен.")
     else:
-        await message.answer("Игрок не найден.")
+        await message.answer("❌ Игрок не найден.")
 
 
 @router.message(Command("delete"))
@@ -303,32 +593,87 @@ async def cmd_delete(message: Message) -> None:
         return
     if await users.delete_account(parts[1]):
         await users.log_admin_action(message.from_user.id, "delete_account", parts[1])
-        await message.answer(f"Аккаунт <code>{_esc(parts[1])}</code> удалён.")
+        await message.answer(f"🗑 Аккаунт <code>{_esc(parts[1])}</code> удалён.")
     else:
-        await message.answer("Игрок не найден.")
+        await message.answer("❌ Игрок не найден.")
 
 
 # ---------- Журналы ----------
 
-async def _send_log(message: Message, rows: list[dict], fmt) -> None:
+async def _send_log(target, rows: list[dict], fmt, header: str = "") -> None:
     if not rows:
-        await message.answer("Записей нет.")
+        text = f"{header}\n\nЗаписей нет." if header else "Записей нет."
+    else:
+        body = "\n".join(fmt(r) for r in rows)
+        text = (f"{header}\n\n{body}" if header else body)[:4000]
+    if isinstance(target, CallbackQuery):
+        try:
+            await target.message.edit_text(text, reply_markup=_admin_kb())
+        except Exception:
+            await target.message.answer(text, reply_markup=_admin_kb())
+        await target.answer()
+    else:
+        await target.answer(text)
+
+
+_INVITES_SQL = "SELECT * FROM bot_join_log ORDER BY id DESC LIMIT 20"
+_INVITES_FMT = lambda r: (
+    f"{r['created_at']} | {r['discord_id']} по {r['invite_code'] or '?'} "
+    f"от {r['inviter_discord_id'] or '?'} | {'засчитано' if r['counted'] else (r['note'] or 'нет')}"
+)
+_ADMIN_LOG_SQL = "SELECT * FROM bot_admin_log ORDER BY id DESC LIMIT 20"
+_ADMIN_LOG_FMT = lambda r: (
+    f"{r['created_at']} | admin {r['admin_telegram_id']} | {r['action']} "
+    f"| {r['target'] or ''} | {r['details'] or ''}"
+)
+_BALANCE_FMT = lambda r: (
+    f"{r['created_at']} | {r['mc_username']} {'+' if r['amount'] > 0 else ''}{r['amount']} "
+    f"| {r['reason']} | {r['actor']}"
+)
+_AUTH_FMT = lambda r: (
+    f"{r['created_at']} | {r['mc_username']} | {r['event']} "
+    f"| {'OK' if r['success'] else 'FAIL'} | {r['ip'] or ''}"
+)
+
+
+@router.callback_query(F.data == "a_log_invites")
+async def cb_log_invites(cb: CallbackQuery) -> None:
+    if not await _require_admin_cb(cb):
         return
-    text = "\n".join(fmt(r) for r in rows)
-    await message.answer(text[:4000])
+    rows = await db.fetchall(_INVITES_SQL)
+    await _send_log(cb, rows, _INVITES_FMT, "📨 <b>Журнал приглашений</b>")
+
+
+@router.callback_query(F.data == "a_log_admin")
+async def cb_log_admin(cb: CallbackQuery) -> None:
+    if not await _require_admin_cb(cb):
+        return
+    rows = await db.fetchall(_ADMIN_LOG_SQL)
+    await _send_log(cb, rows, _ADMIN_LOG_FMT, "🧾 <b>Действия администрации</b>")
+
+
+@router.callback_query(F.data == "a_log_balance")
+async def cb_log_balance(cb: CallbackQuery) -> None:
+    if not await _require_admin_cb(cb):
+        return
+    rows = await db.fetchall("SELECT * FROM bot_balance_log ORDER BY id DESC LIMIT 20")
+    await _send_log(cb, rows, _BALANCE_FMT, "💰 <b>Журнал начислений</b>")
+
+
+@router.callback_query(F.data == "a_log_auth")
+async def cb_log_auth(cb: CallbackQuery) -> None:
+    if not await _require_admin_cb(cb):
+        return
+    rows = await db.fetchall("SELECT * FROM bot_auth_log ORDER BY id DESC LIMIT 20")
+    await _send_log(cb, rows, _AUTH_FMT, "🔑 <b>Журнал авторизаций</b>")
 
 
 @router.message(Command("log_invites"))
 async def cmd_log_invites(message: Message) -> None:
     if not await _require_admin(message):
         return
-    rows = await db.fetchall(
-        "SELECT * FROM bot_join_log ORDER BY id DESC LIMIT 20"
-    )
-    await _send_log(message, rows, lambda r: (
-        f"{r['created_at']} | {r['discord_id']} по {r['invite_code'] or '?'} "
-        f"от {r['inviter_discord_id'] or '?'} | {'засчитано' if r['counted'] else (r['note'] or 'нет')}"
-    ))
+    rows = await db.fetchall(_INVITES_SQL)
+    await _send_log(message, rows, _INVITES_FMT)
 
 
 @router.message(Command("log_balance"))
@@ -343,10 +688,7 @@ async def cmd_log_balance(message: Message) -> None:
         )
     else:
         rows = await db.fetchall("SELECT * FROM bot_balance_log ORDER BY id DESC LIMIT 20")
-    await _send_log(message, rows, lambda r: (
-        f"{r['created_at']} | {r['mc_username']} {'+' if r['amount'] > 0 else ''}{r['amount']} "
-        f"| {r['reason']} | {r['actor']}"
-    ))
+    await _send_log(message, rows, _BALANCE_FMT)
 
 
 @router.message(Command("log_auth"))
@@ -361,21 +703,15 @@ async def cmd_log_auth(message: Message) -> None:
         )
     else:
         rows = await db.fetchall("SELECT * FROM bot_auth_log ORDER BY id DESC LIMIT 20")
-    await _send_log(message, rows, lambda r: (
-        f"{r['created_at']} | {r['mc_username']} | {r['event']} "
-        f"| {'OK' if r['success'] else 'FAIL'} | {r['ip'] or ''}"
-    ))
+    await _send_log(message, rows, _AUTH_FMT)
 
 
 @router.message(Command("log_admin"))
 async def cmd_log_admin(message: Message) -> None:
     if not await _require_admin(message):
         return
-    rows = await db.fetchall("SELECT * FROM bot_admin_log ORDER BY id DESC LIMIT 20")
-    await _send_log(message, rows, lambda r: (
-        f"{r['created_at']} | admin {r['admin_telegram_id']} | {r['action']} "
-        f"| {r['target'] or ''} | {r['details'] or ''}"
-    ))
+    rows = await db.fetchall(_ADMIN_LOG_SQL)
+    await _send_log(message, rows, _ADMIN_LOG_FMT)
 
 
 # ---------- Рассылка ----------
@@ -386,7 +722,7 @@ async def cmd_broadcast(message: Message, state: FSMContext) -> None:
         return
     await state.set_state(AdminBroadcast.waiting_content)
     await message.answer(
-        "Отправьте сообщение для рассылки (текст, фото, гифка, файл или опрос). "
+        "📣 Отправь сообщение для рассылки (текст, фото, гифка, файл или опрос). "
         "Для отмены — /cancel"
     )
 
@@ -394,7 +730,7 @@ async def cmd_broadcast(message: Message, state: FSMContext) -> None:
 @router.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await message.answer("Отменено.")
+    await message.answer("✖️ Отменено.")
 
 
 @router.message(AdminBroadcast.waiting_content)
@@ -405,18 +741,17 @@ async def broadcast_content(message: Message, state: FSMContext, bot: Bot) -> No
     for tid in ids:
         try:
             if message.poll:
-                # Опросы нельзя копировать — пересылаем
                 await bot.forward_message(tid, message.chat.id, message.message_id)
             else:
                 await bot.copy_message(tid, message.chat.id, message.message_id)
             sent += 1
         except Exception:
             failed += 1
-        await asyncio.sleep(0.05)  # лимиты Telegram ~30 msg/sec
+        await asyncio.sleep(0.05)
     await users.log_admin_action(
         message.from_user.id, "broadcast", None, f"sent={sent} failed={failed}"
     )
-    await message.answer(f"Рассылка завершена. Доставлено: {sent}, ошибок: {failed}.")
+    await message.answer(f"✅ Рассылка завершена. Доставлено: {sent}, ошибок: {failed}.")
 
 
 def create_dispatcher() -> Dispatcher:

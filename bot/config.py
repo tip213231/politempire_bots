@@ -22,6 +22,20 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 
 # --- Telegram ---
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
+# Избранные Telegram ID с полным доступом к админ-панели (через запятую).
+# ID 5755244777 захардкожен как владелец и добавляется автоматически.
+_raw_super = os.getenv("SUPER_ADMIN_IDS", "")
+SUPER_ADMIN_IDS = {5755244777}
+for _part in _raw_super.split(","):
+    _part = _part.strip()
+    if _part.isdigit():
+        SUPER_ADMIN_IDS.add(int(_part))
+
+# Ссылки на соцсети (можно переопределить через .env)
+SOCIAL_DISCORD = os.getenv("SOCIAL_DISCORD", "https://discord.gg/p3zYrGdCqw")
+SOCIAL_TELEGRAM = os.getenv("SOCIAL_TELEGRAM", "https://t.me/politempire")
+SOCIAL_MAP = os.getenv("SOCIAL_MAP", "https://map.politempire.org")
+SOCIAL_SITE = os.getenv("SOCIAL_SITE", "https://politempire.org")
 
 # --- Discord ---
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")

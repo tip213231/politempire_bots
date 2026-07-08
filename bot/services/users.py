@@ -9,7 +9,7 @@ import uuid as uuid_lib
 
 import bcrypt
 
-from bot import db
+from bot import config, db
 
 
 def hash_password(password: str) -> str:
@@ -64,7 +64,21 @@ async def register(telegram_id: int, username: str, password: str) -> tuple[bool
     return True, f"Аккаунт {username} зарегистрирован."
 
 
+async def set_password(user_id: int, new_password: str) -> None:
+    """Обновляет пароль игрока (bcrypt)."""
+    await db.execute(
+        "UPDATE users SET password=%s WHERE id=%s",
+        (hash_password(new_password), user_id),
+    )
+
+
+def is_super_admin(telegram_id: int) -> bool:
+    return telegram_id in config.SUPER_ADMIN_IDS
+
+
 async def is_bot_admin(telegram_id: int) -> bool:
+    if is_super_admin(telegram_id):
+        return True
     row = await db.fetchone(
         "SELECT telegram_id FROM bot_admins WHERE telegram_id=%s", (telegram_id,)
     )
